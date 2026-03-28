@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import RedirectResponse
 import httpx
 from dotenv import load_dotenv
@@ -28,6 +28,19 @@ def resolve_token(custom_token: Optional[str] = None) -> Optional[str]:
     return token or None
 
 
+def extract_bearer_token(authorization: Optional[str] = None) -> Optional[str]:
+    """Extract token from 'Authorization: Bearer <token>'."""
+    if not authorization:
+        return None
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+
+    token = token.strip()
+    return token or None
+
+
 def get_github_headers(
     custom_token: Optional[str] = None,
     include_auth: bool = True,
@@ -47,12 +60,17 @@ async def github_get_with_auth_fallback(
     client: httpx.AsyncClient,
     url: str,
     params: Optional[dict] = None,
+    custom_token: Optional[str] = None,
 ) -> httpx.Response:
     """
     Try GET with auth first; if token is invalid (401), retry unauthenticated.
     This keeps public endpoints usable even when a PAT is missing/incorrect.
     """
-    response = await client.get(url, headers=get_github_headers(), params=params)
+    response = await client.get(
+        url,
+        headers=get_github_headers(custom_token=custom_token),
+        params=params,
+    )
     if response.status_code == 401:
         response = await client.get(
             url,
@@ -62,13 +80,16 @@ async def github_get_with_auth_fallback(
     return response
 
 
-def get_required_token() -> str:
-    """Ensure token exists for write operations."""
-    token = resolve_token()
+def get_required_token(authorization: Optional[str] = None) -> str:
+    """Ensure token exists for write operations (header token first, then PAT)."""
+    token = resolve_token(extract_bearer_token(authorization))
     if not token:
         raise HTTPException(
             status_code=401,
-            detail="Missing GITHUB_PAT. Add it to .env for write operations.",
+            detail=(
+                "Missing token. Provide 'Authorization: Bearer <token>' "
+                "or set GITHUB_PAT in .env."
+            ),
         )
     return token
 
@@ -113,13 +134,18 @@ async def list_issues(owner: str, repo: str):
 
 
 @app.post("/repos/{owner}/{repo}/issues")
-async def create_issue(owner: str, repo: str, issue: IssueCreate):
+async def create_issue(
+    owner: str,
+    repo: str,
+    issue: IssueCreate,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+):
     """Create a new issue in a repository."""
     url = f"https://api.github.com/repos/{owner}/{repo}/issues"
     
     # We convert our Pydantic model back to a dictionary to send to GitHub
     payload = {"title": issue.title, "body": issue.body}
-    token = get_required_token()
+    token = get_required_token(authorization)
     
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -127,6 +153,16 @@ async def create_issue(owner: str, repo: str, issue: IssueCreate):
             json=payload,
             headers=get_github_headers(custom_token=token),
         )
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid GitHub token")
+        if response.status_code == 403:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Token lacks permission to create issues in this repository "
+                    "or repository access is restricted."
+                ),
+            )
         if response.status_code != 201: # 201 means "Created"
             raise HTTPException(status_code=response.status_code, detail=response.json())
             
@@ -181,7 +217,12 @@ async def fetch_commits(
 
 # BONUS: Create a Pull Request
 @app.post("/repos/{owner}/{repo}/pulls")
-async def create_pull_request(owner: str, repo: str, pr: PullRequestCreate):
+async def create_pull_request(
+    owner: str,
+    repo: str,
+    pr: PullRequestCreate,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+):
     """Create a pull request in a repository."""
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
     payload = {
@@ -190,7 +231,7 @@ async def create_pull_request(owner: str, repo: str, pr: PullRequestCreate):
         "base": pr.base,
         "body": pr.body
     }
-    token = get_required_token()
+    token = get_required_token(authorization)
     
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -198,6 +239,16 @@ async def create_pull_request(owner: str, repo: str, pr: PullRequestCreate):
             json=payload,
             headers=get_github_headers(custom_token=token),
         )
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid GitHub token")
+        if response.status_code == 403:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Token lacks permission to create pull requests in this repository "
+                    "or repository access is restricted."
+                ),
+            )
         if response.status_code != 201:
             raise HTTPException(status_code=response.status_code, detail=response.json())
             
