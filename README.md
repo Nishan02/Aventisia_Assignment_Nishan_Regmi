@@ -7,6 +7,7 @@ A backend API built with Python and FastAPI to connect with GitHub and perform c
 - Bonus OAuth 2.0 login flow
 - Fetch repositories for a GitHub user
 - List issues from a repository
+- Fetch commits from a repository
 - Create an issue in a repository
 - Bonus: Create a pull request
 
@@ -104,7 +105,21 @@ curl -X POST http://127.0.0.1:8000/repos/<owner>/<repo>/issues \
   -d "{\"title\":\"Bug report\",\"body\":\"Describe the issue here\"}"
 ```
 
-### 4) Create Pull Request (Bonus)
+### 4) Fetch Commits
+- Method: `GET`
+- Endpoint: `/repos/{owner}/{repo}/commits`
+- Description: Returns commits from the repository.
+- Query params:
+  - `branch` (optional): branch name (example: `main`)
+  - `per_page` (optional): number of results per page (1-100, default 30)
+  - `page` (optional): page number (default 1)
+
+Example:
+```bash
+curl "http://127.0.0.1:8000/repos/octocat/Hello-World/commits?branch=main&per_page=10&page=1"
+```
+
+### 5) Create Pull Request (Bonus)
 - Method: `POST`
 - Endpoint: `/repos/{owner}/{repo}/pulls`
 - Description: Creates a pull request.
@@ -119,7 +134,7 @@ Request body:
 }
 ```
 
-### 5) OAuth Login (Bonus)
+### 6) OAuth Login (Bonus)
 - Method: `GET`
 - Endpoint: `/auth/login`
 - Description: Redirects to GitHub OAuth consent screen.
