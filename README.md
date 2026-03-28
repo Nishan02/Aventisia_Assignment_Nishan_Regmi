@@ -89,6 +89,7 @@ curl http://127.0.0.1:8000/repos/octocat/Hello-World/issues
 - Method: `POST`
 - Endpoint: `/repos/{owner}/{repo}/issues`
 - Description: Creates a new issue in the specified repository.
+- Header (required for write): `Authorization: Bearer <token>`
 
 Request body:
 ```json
@@ -101,6 +102,7 @@ Request body:
 Example:
 ```bash
 curl -X POST http://127.0.0.1:8000/repos/<owner>/<repo>/issues \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d "{\"title\":\"Bug report\",\"body\":\"Describe the issue here\"}"
 ```
@@ -123,6 +125,7 @@ curl "http://127.0.0.1:8000/repos/octocat/Hello-World/commits?branch=main&per_pa
 - Method: `POST`
 - Endpoint: `/repos/{owner}/{repo}/pulls`
 - Description: Creates a pull request.
+- Header (required for write): `Authorization: Bearer <token>`
 
 Request body:
 ```json
@@ -142,6 +145,8 @@ Request body:
 - Method: `GET`
 - Endpoint: `/auth/callback?code=<github_code>`
 - Description: Exchanges authorization code for an access token.
+- Use the returned `access_token` as:
+  `Authorization: Bearer <access_token>`
 
 ## Project Structure
 
