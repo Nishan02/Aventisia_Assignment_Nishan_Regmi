@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import RedirectResponse
 import httpx
 from dotenv import load_dotenv
@@ -16,14 +16,61 @@ CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 # Initialize the FastAPI app
 app = FastAPI(title="GitHub Cloud Connector", description="Assignment API")
 
+@app.get("/", include_in_schema=False)
+def read_root():
+    """Redirect root URL to interactive API docs."""
+    return RedirectResponse(url="/docs")
+
 # Helper function to get the headers needed for GitHub API
-def get_github_headers(custom_token: str = None):
-    # If the user logged in via OAuth, use their token, otherwise use our PAT
-    token = custom_token if custom_token else GITHUB_PAT
-    return {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+def resolve_token(custom_token: Optional[str] = None) -> Optional[str]:
+    """Return a clean token value or None if no token exists."""
+    token = (custom_token or GITHUB_PAT or "").strip()
+    return token or None
+
+
+def get_github_headers(
+    custom_token: Optional[str] = None,
+    include_auth: bool = True,
+) -> dict:
+    """Build headers for GitHub API calls."""
+    headers = {"Accept": "application/vnd.github+json"}
+
+    if include_auth:
+        token = resolve_token(custom_token)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+    return headers
+
+
+async def github_get_with_auth_fallback(
+    client: httpx.AsyncClient,
+    url: str,
+    params: Optional[dict] = None,
+) -> httpx.Response:
+    """
+    Try GET with auth first; if token is invalid (401), retry unauthenticated.
+    This keeps public endpoints usable even when a PAT is missing/incorrect.
+    """
+    response = await client.get(url, headers=get_github_headers(), params=params)
+    if response.status_code == 401:
+        response = await client.get(
+            url,
+            headers=get_github_headers(include_auth=False),
+            params=params,
+        )
+    return response
+
+
+def get_required_token() -> str:
+    """Ensure token exists for write operations."""
+    token = resolve_token()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing GITHUB_PAT. Add it to .env for write operations.",
+        )
+    return token
 
 # ==========================================
 # CORE ACTIONS (REPOS, ISSUES, PRs)
@@ -35,12 +82,14 @@ async def fetch_repositories(username: str):
     url = f"https://api.github.com/users/{username}/repos"
     
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=get_github_headers())
+        response = await github_get_with_auth_fallback(client, url)
         
         # Error handling! If GitHub says "Not Found", we tell our user.
         if response.status_code == 404:
             raise HTTPException(status_code=404, detail="User not found on GitHub")
-        response.raise_for_status() # Raise error for any other failures
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid GitHub token")
+        response.raise_for_status()  # Raise error for any other failures
         
         # Only return the important data, not the massive GitHub payload
         repos = response.json()
@@ -53,7 +102,9 @@ async def list_issues(owner: str, repo: str):
     url = f"https://api.github.com/repos/{owner}/{repo}/issues"
     
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=get_github_headers())
+        response = await github_get_with_auth_fallback(client, url)
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid GitHub token")
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail="Could not fetch issues")
             
@@ -68,9 +119,14 @@ async def create_issue(owner: str, repo: str, issue: IssueCreate):
     
     # We convert our Pydantic model back to a dictionary to send to GitHub
     payload = {"title": issue.title, "body": issue.body}
+    token = get_required_token()
     
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload, headers=get_github_headers())
+        response = await client.post(
+            url,
+            json=payload,
+            headers=get_github_headers(custom_token=token),
+        )
         if response.status_code != 201: # 201 means "Created"
             raise HTTPException(status_code=response.status_code, detail=response.json())
             
@@ -94,7 +150,7 @@ async def fetch_commits(
         params["sha"] = branch
 
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=get_github_headers(), params=params)
+        response = await github_get_with_auth_fallback(client, url, params=params)
         if response.status_code == 404:
             raise HTTPException(status_code=404, detail="Repository not found on GitHub")
         if response.status_code == 409:
@@ -102,6 +158,8 @@ async def fetch_commits(
                 status_code=409,
                 detail="Repository is empty or has no commits yet",
             )
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid GitHub token")
         if response.status_code != 200:
             raise HTTPException(
                 status_code=response.status_code,
@@ -132,9 +190,14 @@ async def create_pull_request(owner: str, repo: str, pr: PullRequestCreate):
         "base": pr.base,
         "body": pr.body
     }
+    token = get_required_token()
     
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload, headers=get_github_headers())
+        response = await client.post(
+            url,
+            json=payload,
+            headers=get_github_headers(custom_token=token),
+        )
         if response.status_code != 201:
             raise HTTPException(status_code=response.status_code, detail=response.json())
             
