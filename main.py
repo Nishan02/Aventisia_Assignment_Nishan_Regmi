@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 import httpx
 from dotenv import load_dotenv
@@ -74,6 +74,50 @@ async def create_issue(owner: str, repo: str, issue: IssueCreate):
             raise HTTPException(status_code=response.status_code, detail=response.json())
             
         return response.json()
+
+
+# Fetch commits from a repository
+@app.get("/repos/{owner}/{repo}/commits")
+async def fetch_commits(
+    owner: str,
+    repo: str,
+    branch: str | None = None,
+    per_page: int = Query(default=30, ge=1, le=100),
+    page: int = Query(default=1, ge=1),
+):
+    """Fetch commits from a specific repository."""
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits"
+    params = {"per_page": per_page, "page": page}
+
+    if branch:
+        params["sha"] = branch
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=get_github_headers(), params=params)
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Repository not found on GitHub")
+        if response.status_code == 409:
+            raise HTTPException(
+                status_code=409,
+                detail="Repository is empty or has no commits yet",
+            )
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Could not fetch commits",
+            )
+
+        commits = response.json()
+        return [
+            {
+                "sha": c.get("sha"),
+                "message": c.get("commit", {}).get("message"),
+                "author": (c.get("commit", {}).get("author") or {}).get("name"),
+                "date": (c.get("commit", {}).get("author") or {}).get("date"),
+                "url": c.get("html_url"),
+            }
+            for c in commits
+        ]
 
 
 # BONUS: Create a Pull Request
