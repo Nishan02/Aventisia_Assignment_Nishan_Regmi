@@ -4,6 +4,7 @@ from fastapi.responses import RedirectResponse
 import httpx
 from dotenv import load_dotenv
 from models import IssueCreate, PullRequestCreate
+from typing import Optional
 
 # Load secrets from the .env file
 load_dotenv()
@@ -81,7 +82,7 @@ async def create_issue(owner: str, repo: str, issue: IssueCreate):
 async def fetch_commits(
     owner: str,
     repo: str,
-    branch: str | None = None,
+    branch: Optional[str] = None,
     per_page: int = Query(default=30, ge=1, le=100),
     page: int = Query(default=1, ge=1),
 ):
