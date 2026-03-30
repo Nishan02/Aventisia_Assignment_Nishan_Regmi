@@ -4,7 +4,8 @@ from fastapi.responses import RedirectResponse
 import httpx
 from dotenv import load_dotenv
 from models import IssueCreate, PullRequestCreate
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import quote
 
 # Load secrets from the .env file
 load_dotenv()
@@ -92,6 +93,82 @@ def get_required_token(authorization: Optional[str] = None) -> str:
             ),
         )
     return token
+
+
+def parse_head_ref(head: str, default_owner: str) -> tuple[str, str]:
+    """Return (owner, branch) from a GitHub PR head ref."""
+    if ":" in head:
+        ref_owner, ref_branch = head.split(":", 1)
+        return ref_owner.strip(), ref_branch.strip()
+    return default_owner, head.strip()
+
+
+def format_github_error_detail(payload: Any) -> str:
+    """Normalize GitHub error responses into readable detail text."""
+    if not isinstance(payload, dict):
+        return "GitHub request failed."
+
+    message = payload.get("message", "GitHub request failed.")
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return message
+
+    parts = []
+    for err in errors:
+        if isinstance(err, str):
+            parts.append(err)
+            continue
+        if not isinstance(err, dict):
+            continue
+        err_msg = err.get("message")
+        if err_msg:
+            parts.append(str(err_msg))
+            continue
+        field = err.get("field")
+        code = err.get("code")
+        resource = err.get("resource")
+        generated = " ".join(str(v) for v in (resource, field, code) if v)
+        if generated:
+            parts.append(generated)
+
+    if not parts:
+        return message
+    return f"{message} | {'; '.join(parts)}"
+
+
+async def ensure_branch_exists(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    branch: str,
+    token: str,
+    branch_role: str,
+) -> None:
+    """Validate that a branch exists before trying to create a PR."""
+    branch_url = f"https://api.github.com/repos/{owner}/{repo}/branches/{quote(branch, safe='')}"
+    response = await client.get(
+        branch_url,
+        headers=get_github_headers(custom_token=token),
+    )
+
+    if response.status_code == 404:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{branch_role} branch '{owner}:{branch}' was not found on GitHub.",
+        )
+    if response.status_code == 401:
+        raise HTTPException(status_code=401, detail="Invalid GitHub token")
+    if response.status_code == 403:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Token lacks permission to read branch data for this repository "
+                "or repository access is restricted."
+            ),
+        )
+    if response.status_code != 200:
+        detail = format_github_error_detail(response.json())
+        raise HTTPException(status_code=response.status_code, detail=detail)
 
 # ==========================================
 # CORE ACTIONS (REPOS, ISSUES, PRs)
@@ -225,15 +302,56 @@ async def create_pull_request(
 ):
     """Create a pull request in a repository."""
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+    base = pr.base.strip()
+    head = pr.head.strip()
+    head_owner, head_branch = parse_head_ref(head, owner)
+
+    if not base or not head_branch:
+        raise HTTPException(
+            status_code=422,
+            detail="Both 'head' and 'base' must be non-empty branch names.",
+        )
+
+    # GitHub rejects PRs from a branch into itself. Catch this early with a clear message.
+    if head_owner.lower() == owner.lower() and head_branch == base:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Cannot create a pull request from '{head_owner}:{head_branch}' "
+                f"into '{base}' because they point to the same branch."
+            ),
+        )
+
     payload = {
         "title": pr.title,
-        "head": pr.head,
-        "base": pr.base,
+        "head": head if ":" in head else head_branch,
+        "base": base,
         "body": pr.body
     }
     token = get_required_token(authorization)
     
     async with httpx.AsyncClient() as client:
+        await ensure_branch_exists(client, owner, repo, base, token, "Base")
+        await ensure_branch_exists(client, head_owner, repo, head_branch, token, "Head")
+
+        # GitHub often returns 422 when a PR already exists for the same head/base.
+        existing_pr_response = await client.get(
+            url,
+            params={"state": "open", "head": f"{head_owner}:{head_branch}", "base": base},
+            headers=get_github_headers(custom_token=token),
+        )
+        if existing_pr_response.status_code == 200:
+            open_prs = existing_pr_response.json()
+            if open_prs:
+                existing_pr = open_prs[0]
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "An open pull request already exists for this branch pair: "
+                        f"{existing_pr.get('html_url')}"
+                    ),
+                )
+
         response = await client.post(
             url,
             json=payload,
@@ -250,7 +368,8 @@ async def create_pull_request(
                 ),
             )
         if response.status_code != 201:
-            raise HTTPException(status_code=response.status_code, detail=response.json())
+            detail = format_github_error_detail(response.json())
+            raise HTTPException(status_code=response.status_code, detail=detail)
             
         return response.json()
 
